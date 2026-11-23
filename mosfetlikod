@@ -1,0 +1,281 @@
+#include <Servo.h>
+
+
+Servo myServo;
+
+
+// Pin tanımları
+const int potPin = A1;         // Potansiyometre orta bacağı (kenarlar 5V ve GND)
+const int servoPin = A0;       // Servo sinyal kablosu
+const int led1Pin = 4;         // D4 -> Mavi LED (Mod 1 ve Mod 2'de yanar)
+const int led2Pin = 5;         // D5 -> 2. LED (Mod 2'de yanar)
+const int greenLedPin = 6;     // D6 -> Yeşil LED (Servo çalışırken yanar)
+const int redLedPin = 7;       // D7 -> Kırmızı LED (Servo dururken yanar)
+const int modeBtnPin = 2;      // D2 -> Mod butonu (D2 ile GND arası)
+const int powerBtnPin = 3;     // D3 -> Kapatma/Açma butonu (D3 ile GND arası)
+const int mosfetGatePin = 8;   // D8 -> IRLZ44N Pin 1 (Gate) (220 ohm seri, 10k ohm GND pull-down)
+
+
+// Sistem güç ve mod durumları
+bool isPowerOn = true;
+int mode = 1;                  // 1 = Otomatik 0-180, 2 = Manuel Potansiyometre
+
+
+// Titreme önleme ayarları (2. Mod)
+const int deadband = 2;
+const float alpha = 0.25;
+float smoothPot = 0.0;
+int lastAngle = -1;
+
+
+// 1. Mod zamanlama
+int autoAngle = 0;
+int autoStep = 2;
+unsigned long lastAutoStepTime = 0;
+const unsigned long autoStepDelay = 20;
+
+
+// Servo hareket LED zamanlama
+unsigned long lastMoveTime = 0;
+const unsigned long moveHoldMs = 150;
+
+
+// Buton debounce ayarları
+const unsigned long modeDebounceMs = 50;
+const unsigned long powerDebounceMs = 50;
+
+
+int lastModeRaw = HIGH;
+int modeState = HIGH;
+unsigned long lastModeBounce = 0;
+
+
+int lastPowerRaw = HIGH;
+int powerState = HIGH;
+unsigned long lastPowerBounce = 0;
+
+
+void markMoving() {
+  lastMoveTime = millis();
+}
+
+
+void ledsOff() {
+  digitalWrite(led1Pin, LOW);
+  digitalWrite(led2Pin, LOW);
+  digitalWrite(greenLedPin, LOW);
+  digitalWrite(redLedPin, LOW);
+}
+
+
+void updateLeds() {
+  if (!isPowerOn) {
+    ledsOff();
+    return;
+  }
+
+
+  if (mode == 1) {
+    digitalWrite(led1Pin, HIGH);
+    digitalWrite(led2Pin, LOW);
+  } else {
+    digitalWrite(led1Pin, HIGH);
+    digitalWrite(led2Pin, HIGH);
+  }
+
+
+  bool moving = (millis() - lastMoveTime) <= moveHoldMs;
+  digitalWrite(greenLedPin, moving ? HIGH : LOW);
+  digitalWrite(redLedPin, moving ? LOW : HIGH);
+}
+
+
+void powerOnSystem() {
+  isPowerOn = true;
+
+
+  digitalWrite(mosfetGatePin, HIGH);
+  delay(50);
+
+
+  pinMode(servoPin, OUTPUT);
+  if (myServo.attached()) {
+    myServo.detach();
+  }
+  myServo.attach(servoPin);
+
+
+  smoothPot = analogRead(potPin);
+  lastAngle = -1;
+  lastAutoStepTime = millis();
+  lastMoveTime = millis() - moveHoldMs - 1;
+  updateLeds();
+
+
+  Serial.print("SISTEM ACIK | Mod: ");
+  Serial.println(mode);
+}
+
+
+void powerOffSystem() {
+  isPowerOn = false;
+
+
+  if (myServo.attached()) {
+    myServo.detach();
+  }
+  pinMode(servoPin, INPUT);
+  digitalWrite(servoPin, LOW);
+
+
+  ledsOff();
+  digitalWrite(mosfetGatePin, LOW);
+
+
+  Serial.println("SISTEM KAPALI (Servo serbest)");
+}
+
+
+void setup() {
+  Serial.begin(9600);
+
+
+  pinMode(led1Pin, OUTPUT);
+  pinMode(led2Pin, OUTPUT);
+  pinMode(greenLedPin, OUTPUT);
+  pinMode(redLedPin, OUTPUT);
+  pinMode(mosfetGatePin, OUTPUT);
+
+
+  pinMode(modeBtnPin, INPUT_PULLUP);
+  pinMode(powerBtnPin, INPUT_PULLUP);
+
+
+  smoothPot = analogRead(potPin);
+  powerOnSystem();
+}
+
+
+void readModeButton() {
+  int reading = digitalRead(modeBtnPin);
+  unsigned long now = millis();
+
+
+  if (reading != lastModeRaw) {
+    lastModeBounce = now;
+    lastModeRaw = reading;
+  }
+
+
+  if ((now - lastModeBounce) >= modeDebounceMs && reading != modeState) {
+    modeState = reading;
+    if (modeState == LOW && isPowerOn) {
+      mode = (mode == 1) ? 2 : 1;
+      lastAngle = -1;
+      smoothPot = analogRead(potPin);
+      Serial.print("MOD DEGISIKLIGI -> Mod ");
+      Serial.println(mode);
+    }
+  }
+}
+
+
+void readPowerButton() {
+  int reading = digitalRead(powerBtnPin);
+  unsigned long now = millis();
+
+
+  if (reading != lastPowerRaw) {
+    lastPowerBounce = now;
+    lastPowerRaw = reading;
+  }
+
+
+  if ((now - lastPowerBounce) >= powerDebounceMs && reading != powerState) {
+    powerState = reading;
+    if (powerState == LOW) {
+      Serial.println("D3 BUTON BASILDI");
+      if (isPowerOn) {
+        powerOffSystem();
+      } else {
+        powerOnSystem();
+      }
+    }
+  }
+}
+
+
+void readSerial() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '0') {
+      powerOffSystem();
+    } else if (c == '1') {
+      mode = 1;
+      if (!isPowerOn) powerOnSystem();
+      else Serial.println("MOD DEGISIKLIGI -> Mod 1");
+    } else if (c == '2') {
+      mode = 2;
+      if (!isPowerOn) powerOnSystem();
+      else {
+        lastAngle = -1;
+        smoothPot = analogRead(potPin);
+        Serial.println("MOD DEGISIKLIGI -> Mod 2");
+      }
+    }
+  }
+}
+
+
+void runAuto() {
+  unsigned long now = millis();
+  if (now - lastAutoStepTime >= autoStepDelay) {
+    lastAutoStepTime = now;
+    myServo.write(autoAngle);
+    markMoving();
+
+
+    autoAngle += autoStep;
+    if (autoAngle >= 180) {
+      autoAngle = 180;
+      autoStep = -abs(autoStep);
+    } else if (autoAngle <= 0) {
+      autoAngle = 0;
+      autoStep = abs(autoStep);
+    }
+  }
+}
+
+
+void runManual() {
+  int raw = analogRead(potPin);
+  smoothPot = (alpha * raw) + ((1.0 - alpha) * smoothPot);
+  int angle = constrain(map((int)smoothPot, 0, 1023, 0, 180), 0, 180);
+
+
+  if (lastAngle < 0 || abs(angle - lastAngle) >= deadband) {
+    myServo.write(angle);
+    lastAngle = angle;
+    markMoving();
+  }
+}
+
+
+void loop() {
+  readPowerButton();
+  readModeButton();
+  readSerial();
+
+
+  if (isPowerOn) {
+    if (mode == 1) {
+      runAuto();
+    } else {
+      runManual();
+    }
+  }
+
+
+  updateLeds();
+}
+
